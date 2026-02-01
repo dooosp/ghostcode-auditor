@@ -1,0 +1,96 @@
+language: typescript-react
+version: "1.0"
+
+rules:
+  # === 렌더/상태/부작용 ===
+  - id: REACT-001
+    name: render_side_effect
+    when: "fetch/localStorage/sessionStorage call in component body (outside useEffect)"
+    severity: high
+    action: "useEffect로 이동, 의존성 배열 정의"
+
+  - id: REACT-002
+    name: useeffect_deps_missing
+    when: "useEffect with empty or missing dependency array referencing outer variables"
+    severity: high
+    action: "deps 명시, useCallback/useMemo 적용"
+
+  - id: REACT-003
+    name: setstate_in_loop
+    when: "setState called inside loop or chained setState calls > 3"
+    severity: medium
+    action: "useReducer 패턴으로 전환"
+
+  - id: REACT-004
+    name: derived_state
+    when: "useState initialized from props or other state without transformation"
+    severity: medium
+    action: "useMemo 또는 직접 계산으로 대체"
+
+  - id: REACT-005
+    name: prop_drilling
+    when: "prop passed through >= 3 intermediate components unchanged"
+    severity: low
+    action: "Context 분리 또는 컴포넌트 구조 변경"
+
+  # === 타입/에러/경계 ===
+  - id: TS-001
+    name: any_abuse
+    when: "explicit 'any' type annotation count > 3 in unit"
+    severity: medium
+    action: "타입 좁히기, unknown + type guard 사용"
+
+  - id: TS-002
+    name: api_call_no_trycatch
+    when: "fetch/axios call without surrounding try/catch or .catch()"
+    severity: high
+    action: "공통 fetch wrapper로 통합, 에러 핸들링 추가"
+
+  - id: TS-003
+    name: empty_catch
+    when: "catch block with empty body or only console.log"
+    severity: high
+    action: "에러 로깅/토스트/리트라이 추가"
+
+  - id: TS-004
+    name: null_unsafe
+    when: "property access chain without optional chaining or null guard (>= 3 deep)"
+    severity: medium
+    action: "optional chaining (?.) 또는 early return guard"
+
+  # === 복잡도/중복 ===
+  - id: CX-001
+    name: boolean_overload
+    when: "boolean expression with >= 6 operators (&&, ||)"
+    severity: medium
+    action: "predicate 함수로 추출"
+
+  - id: CX-002
+    name: deep_nesting
+    when: "nesting_depth >= 5"
+    severity: high
+    action: "early return 패턴 또는 함수 분리"
+
+  - id: CX-003
+    name: inline_handler_unstable
+    when: "arrow function defined inline in JSX prop + used in deps"
+    severity: medium
+    action: "useCallback 적용"
+
+  - id: CX-004
+    name: duplicate_logic
+    when: "redundancy_cluster member (similarity >= 0.7)"
+    severity: medium
+    action: "shared utility 추출"
+
+  - id: CX-005
+    name: magic_strings
+    when: ">= 3 identical string literals in same file"
+    severity: low
+    action: "constants 모듈 또는 enum으로 추출"
+
+  - id: CX-006
+    name: comment_over_naming
+    when: "comment-to-code ratio > 0.4 AND identifier_ambiguity > 50%"
+    severity: low
+    action: "함수/변수 네이밍 개선, 불필요 주석 제거"
