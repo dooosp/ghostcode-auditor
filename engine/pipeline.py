@@ -1,19 +1,135 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import subprocess
 from pathlib import Path
 
 from engine.ingest import ingest, clone_repo
-from engine.extract import extract_all, parse_file
-from engine.evidence import collect_all_evidence
-from engine.scores import score_all
+from engine.extract import extract_all, parse_file, Unit
+from engine.evidence import collect_all_evidence, Evidence
+from engine.scores import score_all, UnitScores
 from engine.similarity import find_clusters
 from engine.rules import load_rules, match_rules
 from engine.report import build_report, render_pr_comment, save_json
+from engine.cache import get_cached, set_cached, _make_key
 from engine.db import get_conn, init_db
 
+logger = logging.getLogger("ghostcode")
+
 RULES_PATH = Path(__file__).parent.parent / "rules" / "react-ts.yaml"
+RULESET_VERSION = "1.0"
+
+
+def _file_content_hash(repo_path: str, file_path: str) -> str:
+    """SHA256 hash of file content for cache keying."""
+    full = Path(repo_path) / file_path
+    try:
+        data = full.read_bytes()
+        return hashlib.sha256(data).hexdigest()[:16]
+    except (OSError, IOError):
+        return ""
+
+
+def _unit_cache_key(file_hash: str, unit: Unit) -> str:
+    """Build cache key from file hash + unit span + ruleset version."""
+    span_str = f"{unit.span[0]}:{unit.span[1]}"
+    return _make_key(file_hash, span_str, RULESET_VERSION)
+
+
+def _cached_scan(repo_path: str, units: list[Unit]) -> tuple[
+    dict[str, Evidence], dict[str, UnitScores],
+    list[Unit], list[Unit],
+]:
+    """Check cache for each unit. Returns (cached_ev, cached_scores,
+    hit_units, miss_units)."""
+    cached_ev: dict[str, Evidence] = {}
+    cached_scores: dict[str, UnitScores] = {}
+    hit_units: list[Unit] = []
+    miss_units: list[Unit] = []
+
+    # Group units by file for hash efficiency
+    file_hashes: dict[str, str] = {}
+    for u in units:
+        if u.file_path not in file_hashes:
+            file_hashes[u.file_path] = _file_content_hash(
+                repo_path, u.file_path)
+
+    for u in units:
+        fh = file_hashes.get(u.file_path, "")
+        if not fh:
+            miss_units.append(u)
+            continue
+        key = _unit_cache_key(fh, u)
+        cached = get_cached(key)
+        if cached:
+            # Restore from cache
+            ev_data = cached.get("evidence", {})
+            sc_data = cached.get("scores", {})
+            cached_ev[u.id] = Evidence(
+                unit_id=u.id,
+                distinct_authors=ev_data.get("distinct_authors", 0),
+                touched_after_creation=ev_data.get(
+                    "touched_after_creation", False),
+                touch_count_30d=ev_data.get("touch_count_30d", 0),
+                touch_count_90d=ev_data.get("touch_count_90d", 0),
+                commit_signals=ev_data.get("commit_signals", []),
+                review_evidence_score=ev_data.get(
+                    "review_evidence_score", 0),
+            )
+            cached_scores[u.id] = UnitScores(
+                unit_id=u.id,
+                cognitive_load=sc_data.get("cognitive_load", 0),
+                review_evidence=sc_data.get("review_evidence", 0),
+                shadow=sc_data.get("shadow", False),
+                fragility=sc_data.get("fragility", 0),
+                redundancy_cluster_id=sc_data.get(
+                    "redundancy_cluster_id"),
+            )
+            hit_units.append(u)
+        else:
+            miss_units.append(u)
+
+    return cached_ev, cached_scores, hit_units, miss_units
+
+
+def _store_cache(repo_path: str, miss_units: list[Unit],
+                 ev_map: dict[str, Evidence],
+                 scores_map: dict[str, UnitScores]):
+    """Store computed results in cache for miss units."""
+    file_hashes: dict[str, str] = {}
+    for u in miss_units:
+        if u.file_path not in file_hashes:
+            file_hashes[u.file_path] = _file_content_hash(
+                repo_path, u.file_path)
+
+    for u in miss_units:
+        fh = file_hashes.get(u.file_path, "")
+        if not fh:
+            continue
+        key = _unit_cache_key(fh, u)
+        ev = ev_map.get(u.id)
+        sc = scores_map.get(u.id)
+        if ev and sc:
+            data = {
+                "evidence": {
+                    "distinct_authors": ev.distinct_authors,
+                    "touched_after_creation": ev.touched_after_creation,
+                    "touch_count_30d": ev.touch_count_30d,
+                    "touch_count_90d": ev.touch_count_90d,
+                    "commit_signals": ev.commit_signals,
+                    "review_evidence_score": ev.review_evidence_score,
+                },
+                "scores": {
+                    "cognitive_load": sc.cognitive_load,
+                    "review_evidence": sc.review_evidence,
+                    "shadow": sc.shadow,
+                    "fragility": sc.fragility,
+                    "redundancy_cluster_id": sc.redundancy_cluster_id,
+                },
+            }
+            set_cached(key, data)
 
 
 def run_full_scan(repo_path: str, repo_name: str = "") -> dict:
@@ -24,8 +140,29 @@ def run_full_scan(repo_path: str, repo_name: str = "") -> dict:
         repo_name = Path(repo_path).name
 
     units = extract_all(result.repo_path, result.files)
-    ev_map = collect_all_evidence(result.repo_path, units)
-    scores = score_all(units, ev_map)
+
+    # Cache lookup
+    cached_ev, cached_scores, hit_units, miss_units = _cached_scan(
+        result.repo_path, units)
+    cache_hits = len(hit_units)
+    cache_misses = len(miss_units)
+    if cache_hits > 0:
+        logger.info("Cache: %d hits, %d misses", cache_hits, cache_misses)
+
+    # Compute only for cache misses
+    if miss_units:
+        new_ev = collect_all_evidence(result.repo_path, miss_units)
+        new_scores = score_all(miss_units, new_ev)
+        # Store in cache
+        _store_cache(result.repo_path, miss_units, new_ev, new_scores)
+    else:
+        new_ev = {}
+        new_scores = {}
+
+    # Merge cached + new
+    ev_map = {**cached_ev, **new_ev}
+    scores = {**cached_scores, **new_scores}
+
     clusters = find_clusters(units)
 
     rules = load_rules(RULES_PATH)
@@ -67,8 +204,19 @@ def run_pr_scan(repo_path: str, repo_name: str,
     if not units:
         return {"scan_id": "none", "summary": {"scanned_units": 0}}
 
-    ev_map = collect_all_evidence(repo_path, units)
-    scores = score_all(units, ev_map)
+    # Cache lookup
+    cached_ev, cached_scores, hit_units, miss_units = _cached_scan(
+        repo_path, units)
+    if miss_units:
+        new_ev = collect_all_evidence(repo_path, miss_units)
+        new_scores = score_all(miss_units, new_ev)
+        _store_cache(repo_path, miss_units, new_ev, new_scores)
+    else:
+        new_ev = {}
+        new_scores = {}
+
+    ev_map = {**cached_ev, **new_ev}
+    scores = {**cached_scores, **new_scores}
     clusters = find_clusters(units)
 
     rules = load_rules(RULES_PATH)

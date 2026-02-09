@@ -550,10 +550,13 @@ fetch(`http://localhost:${GHOSTCODE_PORT}/pr`, {
 
 ### M5: 캐시 + 최적화
 
-- [ ] SQLite 캐시 테이블
-- [ ] 증분 스캔 최적화 (변경 unit만)
+- [x] SQLite 캐시 테이블
+- [x] 캐시를 파이프라인에 연결 (file_hash + unit_span + ruleset_version 키)
+- [x] 증분 스캔 최적화 (변경 unit만)
 - [ ] 중복 탐지 범위 제한 (같은 디렉토리)
-- [ ] 테스트 (규칙 15개 + 점수 정확도)
+- [x] 테스트 (pytest 55개: extract, scores, similarity, rules, cache, report, E2E)
+- [x] callback_depth 버그 수정 (항상 0 → arrow function 중첩 계산)
+- [x] Python 3.9 호환성 수정 (ingest.py `from __future__ import annotations`)
 
 ---
 

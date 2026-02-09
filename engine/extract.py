@@ -131,6 +131,26 @@ def _extract_hooks(node: Node) -> list[str]:
     return hooks
 
 
+def _count_callback_depth(node: Node) -> int:
+    """Calculate max nesting depth of arrow functions / function expressions."""
+    callback_types = {"arrow_function", "function_expression"}
+
+    def _recurse(n: Node, depth: int) -> int:
+        max_d = depth
+        for child in n.children:
+            if child.type in callback_types:
+                max_d = max(max_d, _recurse(child, depth + 1))
+            else:
+                max_d = max(max_d, _recurse(child, depth))
+        return max_d
+
+    # Start from body to skip the function itself if it's an arrow/expression
+    body = node.child_by_field_name("body")
+    if body is None:
+        return 0
+    return _recurse(body, 0)
+
+
 def _count_boolean_complexity(node: Node) -> int:
     count = 0
     for c in _walk(node):
@@ -228,6 +248,7 @@ def _build_unit(file_path: str, func_node: Node, name: str) -> Unit:
         try_catch_count=_count_try_catch(func_node),
         hook_calls=_extract_hooks(func_node),
         boolean_complexity=_count_boolean_complexity(func_node),
+        callback_depth=_count_callback_depth(func_node),
         render_side_effects=_count_render_side_effects(func_node),
         identifier_ambiguity=_calc_identifier_ambiguity(func_node),
         source=source,
